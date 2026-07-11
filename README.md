@@ -54,25 +54,7 @@ AI Dialog 窗口顶部有四种访问模式：
 - **API URL**：任意支持 OpenAI 格式 API 的地址，如 `http://localhost:1234`（LM Studio）、`http://localhost:11434`（Ollama）、`http://localhost:8000`（vLLM）等
 - **API Key**：Bearer Token，LM Studio 通常可以留空或填 `sk-xxx`
 
-### 3、启动本地模型
-
-**LM Studio 示例：**
-```
-1. 打开 LM Studio
-2. 选择一个模型（推荐 qwen2.5-coder 或 gemma3 系列）
-3. 点击 Local Server → 启动
-4. 默认监听 http://localhost:1234
-5. 在 CE 的 Custom API 中填入 URL 和 Key
-```
-
-**Ollama 示例：**
-```
-1. 安装 Ollama 并拉取模型：ollama pull qwen2.5-coder
-2. 启动：ollama serve（默认 http://localhost:11434）
-3. 在 CE 的 Custom API 中填入 URL，Key 留空或填任意值
-```
-
-### 4、使用
+### 3、使用
 
 - 在输入框中输入问题（如"分析这段汇编代码"）
 - 点击 **Send** 发送
@@ -99,7 +81,7 @@ AI Dialog 窗口顶部有四种访问模式：
 | 组件 | 用途 |
 |------|------|
 | Lua (Cheat Engine Runtime) | AI 对话引擎、工具调度、网络请求 |
-| OpenAI Compatible API | LM Studio / Ollama / vLLM 等本地推理后端 |
+| OpenAI Compatible API | 支持 OpenAI 格式 API 的任意本地推理后端（LM Studio / Ollama / vLLM / 等） |
 | SSE (Server-Sent Events) | 流式响应传输 |
 | Google Gemini → OpenAI 转换 | 消息格式、工具定义、流式响应的双向适配 |
 
