@@ -47,11 +47,11 @@ AI Dialog 窗口顶部有四种访问模式：
 | Public CE API | CE 官方公共 API（有限额，Gemini 2.5 Flash） |
 | Patreon CE API | Patreon 支持者专属 API（限额更高） |
 | Personal Google AI Key | 使用自己的 Google AI Studio API Key（推荐） |
-| **Custom API** | **填入你自己的 API URL + Key（LM Studio / Ollama / 等）** |
+| **Custom API** | **填入任意支持 OpenAI 格式 API 的地址（LM Studio / Ollama / vLLM / 等）** |
 
 选择 **Custom API** 后填写：
 
-- **API URL**：例如 `http://localhost:1234`（LM Studio）或 `http://localhost:11434`（Ollama）
+- **API URL**：任意支持 OpenAI 格式 API 的地址，如 `http://localhost:1234`（LM Studio）、`http://localhost:11434`（Ollama）、`http://localhost:8000`（vLLM）等
 - **API Key**：Bearer Token，LM Studio 通常可以留空或填 `sk-xxx`
 
 ### 3、启动本地模型
