@@ -35,7 +35,7 @@
    ```
    ~\Cheat Engine 7.7\Extensions\AITools\
    ```
-2. 启动 Cheat Engine → **设置** → **ai工具** → **启动ai功能**<img width="1202" height="890" alt="image" src="https://github.com/user-attachments/assets/4b4917a9-7307-4bb1-8851-327b08e2ae57" />
+2. 启动 Cheat Engine → **设置** → **ai工具** → **启用ai功能**<img width="1202" height="890" alt="image" src="https://github.com/user-attachments/assets/4b4917a9-7307-4bb1-8851-327b08e2ae57" />
 
 3. 菜单栏 → **帮助** → **询问ai**（或按快捷键）<img width="774" height="783" alt="image" src="https://github.com/user-attachments/assets/5ab81b82-e9b0-453f-a4fb-06e95e786ca2" />
 
