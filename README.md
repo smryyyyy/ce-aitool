@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Lua-000000?style=flat-square&logo=lua&logoColor=white" alt="Lua">
-  <img src="https://img.shields.io/badge/Cheat_Engine-7.5+-0078D8?style=flat-square&logo=microsoftvisualstudio&logoColor=white" alt="CE 7.5+">
+  <img src="https://img.shields.io/badge/Cheat_Engine-7.7+-0078D8?style=flat-square&logo=microsoftvisualstudio&logoColor=white" alt="CE 7.7+">
   <img src="https://img.shields.io/badge/OpenAI_Comp_API-FF6F00?style=flat-square&logo=openai&logoColor=white" alt="OpenAI Compatible">
   <img src="https://img.shields.io/badge/Windows-0078D8?style=flat-square&logo=windows&logoColor=white" alt="Windows">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="MIT License">
@@ -10,7 +10,8 @@
 
 <p align="center">
   Cheat Engine AI 调试助手 — 支持 LM Studio、Ollama、vLLM 等任意 OpenAI 兼容 API。<br>
-  <b>在 CE 内置 AI 对话窗口中直接调用逆向工具，自动分析进程、内存、汇编代码。</b>
+  <b>在 CE 内置 AI 对话窗口中直接调用逆向工具，自动分析进程、内存、汇编代码。</b><br>
+  <i>已在 Cheat Engine 7.7 测试通过，理论 7.5+ 均可使用。</i>
 </p>
 
 ---
