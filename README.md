@@ -118,7 +118,7 @@ AI Dialog 窗口顶部有四种访问模式：
 
 ### 可以在 Mac/Linux 上用吗
 
-CE 本身只在 Windows 上运行（Wine 下可用）。AITools 是纯 Lua 脚本，理论上可移植到其他平台。
+AITools 是纯 Lua 脚本，理论上可移植到其他平台。
 
 ## 许可证
 
