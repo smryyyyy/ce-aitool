@@ -119,7 +119,7 @@ CE 本身只在 Windows 上运行（Wine 下可用）。AITools 是纯 Lua 脚�
 
 ## 许可证
 
-MIT License
+[MIT License](LICENSE)
 
 ---
 
