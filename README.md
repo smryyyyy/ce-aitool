@@ -69,7 +69,6 @@ AI Dialog 窗口顶部有四种访问模式：
 ```bash
 .
 ├── aibase.lua              # 核心引擎：API 路由、消息转换、流式响应解析
-├── aibase.lua.bak          # 原始版本（Google Gemini 模式）
 ├── AIDialog.LFM            # AI 对话窗口 UI 布局
 ├── loadorder.txt           # Lua 文件加载顺序
 ├── AI128x128.png           # 扩展图标
@@ -98,6 +97,7 @@ AI Dialog 窗口顶部有四种访问模式：
 4. **流式响应解析**：支持 OpenAI SSE `data: {...}` 格式
 5. **URL 智能推导**：自动补全 `/v1/chat/completions` 和 `/v1/models` 路径
 6. **UI 增强**：Custom API 单选按钮 + 双输入框（URL + Key）
+7. **Bug 修复**：修复了 15 个已知 bug，包括变量名错误、函数注册错配、读取函数错用、返回值结构错误等
 
 ## 常见问题
 

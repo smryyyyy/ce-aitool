@@ -255,7 +255,6 @@ getLimits=function()
   if AIAccess==0 then
     s=i.getURL('https://cheatengine.org/ai/limits.php')      
   elseif AIAccess==1 then
-    local i=getInternet()    
     i.Header='CEPATREONID:'..PatreonSessionID    
     s=i.getURL('https://cheatengine.org/patreon/ailimits.php')
   end

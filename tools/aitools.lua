@@ -197,7 +197,11 @@ function ai_startWatchpoint(args)
           elseif targetIsArm() then
             r.InstructionPointer=r.context.PC
             r.StackPointer=r.context.SP
-          end 
+          else
+            -- Unknown architecture, cannot determine registers
+            r.InstructionPointer=0
+            r.StackPointer=0
+          end
 
           if data.results[r.InstructionPointer] then
             r=data.results[r.InstructionPointer]
@@ -353,22 +357,22 @@ function ai_getDetailedWatchpointData(args)
   
   --print("ai_getDetailedWatchpointData. args=", args)
   
-  if address==nil then
+  if not address then
     return {error='address was not provided or unparsable'}
   end
   if watchpointID then
     local data=aiobjects[watchpointID]
-    
+
     if data.type~='watchpoint' then
       return {error='watchpointID corrupted'}
     end
-    
+
     if data.results==nil then
       return {error='watchpointID result data missing'}
     end
-    
+
     local e=data.resultsLookupActual[address]
-    if e==nil then
+    if not e then
       return {error='invalid address'}
     end
     
@@ -415,9 +419,9 @@ function ai_disassembleRange(args)
   local showSections=args.showSections or false
   
   local d=createDisassembler()
-  d.showSymbol=true
-  d.showModules=true
-  d.showSections=true  
+  d.showSymbol=showSymbols
+  d.showModules=showModules
+  d.showSections=showSections  
   
   local r={}
   
@@ -533,7 +537,7 @@ readFunctions['vtWord']=function(address) return readSmallInteger(address) end
 readFunctions['vtDword']=function(address) return readInteger(address) end
 readFunctions['vtQword']=function(address) return string.format("%x",readQword(address)) end
 readFunctions['vtSingle']=function(address) return readFloat(address) end
-readFunctions['vtDouble']=function(address) return readString(address) end
+readFunctions['vtDouble']=function(address) return readDouble(address) end
 
 local readSizes={}
 readSizes['vtByte']=1
@@ -621,14 +625,18 @@ function ai_syntaxCheckAutoAssemblerScript(args)
   if not r then
     return {error=r2}  
   else
-    return {status='successs'}
+    return {status='success'}
   end
 end
 
 
 function ai_getVersionStrings(args)
-  s,s2=getFileVersion(enumModules()[1].PathToFile)
-  return {s2}
+  local modules=enumModules()
+  if not modules or #modules==0 then
+    return {error='No modules loaded'}
+  end
+  s,s2=getFileVersion(modules[1].PathToFile)
+  return {versionInfo=s2}
 end
 
 function ai_showMemoryView(args)
@@ -649,10 +657,11 @@ function ai_createMemoryRecord(args)
   return synchronize(function()
     local parent=nil
     if args.parentNode then
-      local parent=AddressList.getMemoryRecordByID(id)
-      if parent==nil then      
+      local newParent=AddressList.getMemoryRecordByID(args.parentNode)
+      if newParent==nil then
         return {error='the parentNode was not valid'}
       end
+      parent=newParent
     end  
   
     local mr=AddressList.createMemoryRecord()
@@ -682,11 +691,11 @@ function ai_createMemoryRecord(args)
       end
       
       if args.offsets then
-        local i=1,#args.offsets do
-          mr.OffsetText[i-1]=args.offsets[i]
+        for local_i=1,#args.offsets do
+          mr.OffsetText[local_i-1]=args.offsets[local_i]
         end
-      end       
-    end  
+      end
+    end
     
     if parent then
       mr.parent=parent
@@ -702,18 +711,16 @@ function ai_editMemoryRecord(args)
     if id then
       local mr=AddressList.getMemoryRecordByID(id)
       if mr then
-        local description=args.description
-    
-        local parent=mr.parent
-        if args.parentNode then
-          local parent=AddressList.getMemoryRecordByID(id)
-          if parent==nil then      
-            return {error='the parentNode was not valid'}            
-          end
-        end
-
         if args.description then
           mr.description=args.description
+        end
+
+        local newParent=mr.parent
+        if args.parentNode then
+          newParent=AddressList.getMemoryRecordByID(args.parentNode)
+          if newParent==nil then
+            return {error='the parentNode was not valid'}
+          end
         end
         
         if args.script then
@@ -739,8 +746,8 @@ function ai_editMemoryRecord(args)
           end
           
           if args.offsets then
-            local i=1,#args.offsets do
-              mr.OffsetText[i-1]=args.offsets[i]
+            for local_i=1,#args.offsets do
+              mr.OffsetText[local_i-1]=args.offsets[local_i]
             end
           end  
 
@@ -754,7 +761,7 @@ function ai_editMemoryRecord(args)
         end  
         
         if args.parentNode then
-          mr.parent=parent
+          mr.parent=newParent
         end
        
         return {status='success'}        
@@ -772,15 +779,13 @@ function ai_deleteMemoryRecord(args)
   
   return synchronize(function()
     if id then
-      return synchronize(function()
-        local mr=AddressList.getMemoryRecordByID(id)
-        if mr then
-          mr.destroy()
-          return {status='success'}        
-        else
-          return {error='The memoryrecord with the given ID was not found'}        
-        end
-      end)    
+      local mr=AddressList.getMemoryRecordByID(id)
+      if mr then
+        mr.destroy()
+        return {status='success'}        
+      else
+        return {error='The memoryrecord with the given ID was not found'}        
+      end
     else    
       return {error='memoryRecordID parameter was missing'}
     end
@@ -831,16 +836,16 @@ function ai_getMemoryRecordDetails(args)
           r.stringSize=mr.String.Size
           
           if mr.String.Unicode then
-            r.vartype=vtWideString
+            r.vartype='vtWideString'
           else
-            r.vartype=vtString
+            r.vartype='vtString'
           end
         end     
        
         
         if mr.Script then
           r.script=mr.Script
-          r.async=mr.async
+          r.async=mr.Async
         else
           r.address=mr.Address
           local offsets={}
@@ -985,7 +990,7 @@ function ai_setAutoAssemblerScript(args)
   end
   
   if aawindow==nil then
-    return {error='Invalid LuaEngineWindowID'}
+    return {error='Invalid AutoAssemblerWindowID'}
   end
   
   synchronize(function()
@@ -1167,7 +1172,7 @@ registerAITool('getModuleSections', [[Gets the section list of the specified mod
                                              moduleName={type='STRING', description='The name of the module to retrieve the sections from'},
                                              }, --parameters
                                              {'moduleName'}, --required
-                                             ai_getFunctionRange) --function
+                                             ai_getModuleSections) --function
 
 registerAITool('getTargetedProcessInfo', [[Gets architecture information about the target process: The calling convention, if the target is 64-bit, if it's ARM or x86, and if it's android or not]],
                                              {                                                                                                                                           
