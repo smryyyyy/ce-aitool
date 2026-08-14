@@ -193,7 +193,7 @@ object frmAIDialog: TCEForm
       )
       ParentFont = False
       TabOrder = 0
-      Style = csDropDownList
+      Style = csDropDown
       Text = 'gemini-2.5-flash'
     end
   end

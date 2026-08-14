@@ -1,0 +1,22 @@
+# Backup / editor cruft
+*.bak
+*.swp
+*.swo
+*~
+.~*
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Local work directories (used for reversible deletes)
+.trash/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Lua build artifacts
+luac.out
+*.luac

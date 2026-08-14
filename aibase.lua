@@ -188,7 +188,7 @@ retrieveModelList=function(combobox)
       key = combobox.Owner.edtAPIKEY.text
     end
     if key and key~='' then
-      i.Header='Authorization: *** '..key
+      i.Header='Authorization: Bearer '..key
     end
     if modelUrl~='' then
       -- Derive /v1/models from the chat completions URL
@@ -710,9 +710,12 @@ Authorization: Bearer ]]..AIKEY
         if parsed then
           if parsed.error then
             data.Error=true
-            textresult='Base error:'..parsed.error
             if parsed.error.message then
               textresult=parsed.error.message
+            elseif type(parsed.error)=='string' then
+              textresult=parsed.error
+            else
+              textresult='Unknown error from server'
             end
           else
             -- Handle OpenAI format (AIAccess==3)
