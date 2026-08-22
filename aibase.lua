@@ -10,25 +10,28 @@
 --https://github.com/cheat-engine/AITools
 
 local s=getSettings('AITOOLS',true)
-local AIAccess=tonumber(s.AIAccess)
-local PatreonSessionID=s.PatreonSessionID or getCEPatreonSessionID()
+local AIAccess=3
 local AIKEY=s.AIKEY
 local CustomURL=s.CustomURL or ''
 local jsonparser=require 'json'
-local agreedToSendData=s.agreedToSendData or false
 
-modelList=nil
+-- === 长上下文管理(L2) ===
+local HISTORY_WINDOW = 20        -- 保留最近 N 轮对话(40 条消息)
+local TOOL_RESULT_MAX = 2048     -- 工具结果超过 N 字节触发截断
+local TOOL_RESULT_HEAD = 800     -- 截断后保留头部字节数
+local TOOL_RESULT_TAIL = 400     -- 截断后保留尾部字节数
+local TOKEN_SOFT_LIMIT = 8000    -- 软限:超了逐轮丢早期对话
+local TOKEN_HARD_LIMIT = 16000   -- 硬限:超过这个就强制截断
+
 local waitingForList={} --list of comboboxes waiting for a list of models
 
 local pathdelim=(getOperatingSystem()==0) and [[\]] or [[/]]
-  
+
 local basepath=extractFilePath(getCurrentScriptPath())
 if basepath==nil then
   basepath=getCheatEngineDir()..'Extensions'..pathdelim..'AITools'..pathdelim
 end
 
-local modelNameToNameLookup={} --for AIAccess 2 
-  
 
 aitools={}
 aiobjects={} --todo: move to data and free objects when the chat session ends
@@ -102,6 +105,62 @@ function find_json_block(text)
 end
 
 
+-- L2:工具结果超长截断(头 + 省略标记 + 尾)
+local function truncateToolResult(s)
+  if type(s) ~= 'string' or #s <= TOOL_RESULT_MAX then
+    return s
+  end
+  local omitted = #s - TOOL_RESULT_HEAD - TOOL_RESULT_TAIL
+  return s:sub(1, TOOL_RESULT_HEAD)
+    .. string.format("\n\n...[已省略 %d 字符,完整结果请查看对话框输出]...\n\n", omitted)
+    .. s:sub(-TOOL_RESULT_TAIL)
+end
+
+-- L2:粗估 token 数(英文 4 字符/token,中文 1.5 字符/token)
+local function estimateTokens(s)
+  if type(s) ~= 'string' or s == '' then return 0 end
+  local en, cn = 0, 0
+  for i = 1, #s do
+    local b = string.byte(s, i)
+    if b >= 0x80 then
+      cn = cn + 1
+    else
+      en = en + 1
+    end
+  end
+  return math.ceil(en / 4 + cn / 1.5)
+end
+
+-- L2:估算 OpenAI messages 数组总 token
+local function estimateMessagesTokens(messages)
+  if type(messages) ~= 'table' then return 0 end
+  local total = 0
+  for _, m in ipairs(messages) do
+    if type(m) == 'table' then
+      if type(m.content) == 'string' then
+        total = total + estimateTokens(m.content)
+      end
+      if m.tool_calls then
+        total = total + 50 * #m.tool_calls
+      end
+    end
+  end
+  return total
+end
+
+-- L2:历史滑窗(只保留最近 N 轮)
+local function applyHistoryWindow(history)
+  if not history or not history.contents then return end
+  local maxItems = HISTORY_WINDOW * 2
+  if #history.contents <= maxItems then return end
+  local keep = {}
+  for i = #history.contents - maxItems + 1, #history.contents do
+    table.insert(keep, history.contents[i])
+  end
+  history.contents = keep
+end
+
+
 local retrieveModelList=nil
 local fillModelList=nil
 local aiRequest=nil
@@ -111,128 +170,64 @@ retrieveModelList=function(combobox)
   if combobox then
     combobox.clear()
   end
-  
-  if AIAccess==0 or AIAccess==1 then
-    if combobox==nil then return end
-    
-    local limits=getLimits()
-    
-    --return limits.models
-    
-    if limits and limits.models then
-      for i=1,#limits.models do
-        combobox.items.add(limits.models[i].name)
-      end
-    else
-      if limits.error then
-        
-        messageDialog('Failure obtaining model list:'..limits.error..'\n\r\n\rConsider becoming a patreon member or get an AI key from google. You\'ll have access to better models', mtError)
-        return
-      else
-        combobox.items.add('<Failed obtaining model list>')
-        combobox.items.add('<It\'s more than the public one>')      
-      end
-    end
-    
-    
-  elseif AIAccess==2 then
-    local i=getInternet()
-    if AIKEY==nil then
-      AIKEY=combobox.Owner.edtAPIKEY.text
-    end
-    i.Header='x-goog-api-key: '..AIKEY
-    jsonModelList=i.getURL('https://generativelanguage.googleapis.com/v1beta/models')
-    i.destroy()
 
-    local jml=jsonparser.decode(jsonModelList)
-
-    if jml then
-      if jml.error then       
-        messageDialog('Failure obtaining model list:'..jml.error.message, mtError)
-        return
-      end
-
-      if jml.models then
-        modelList={}
-        for i=1,#jml.models do
-          local has_generateContent=false
-          if jml.models[i].supportedGenerationMethods then
-            for j=1,#jml.models[i].supportedGenerationMethods do
-              if jml.models[i].supportedGenerationMethods[j]=='generateContent' then
-                has_generateContent=true
-                break
-              end
-            end
-            if has_generateContent==true then
-              if combobox then
-                combobox.items.add(jml.models[i].displayName)              
-              end
-              modelList[jml.models[i].displayName]=jml.models[i]
-            end
-          end
-        end
-      end
-     
-    end
-  elseif AIAccess==3 then
-    -- Fetch model list from custom OpenAI-compatible API
-    local i=getInternet()
-    local modelUrl = ''
-    if combobox and combobox.Owner and combobox.Owner.edtCustomURL then
-      modelUrl = combobox.Owner.edtCustomURL.text
-    else
-      modelUrl = CustomURL
-    end
-    local key = AIKEY
-    if combobox and combobox.Owner and combobox.Owner.edtAPIKEY then
-      key = combobox.Owner.edtAPIKEY.text
-    end
-    if key and key~='' then
-      i.Header='Authorization: Bearer '..key
-    end
-    if modelUrl~='' then
-      -- Derive /v1/models from the chat completions URL
-      if modelUrl:match('/chat/completions$') then
-        modelUrl = modelUrl:gsub('/chat/completions$', '/models')
-      elseif not modelUrl:match('/models$') then
-        -- Try various URL patterns:
-        -- http://host:port/v1/chat/completions  → /v1/models
-        -- http://host:port/v1                    → /v1/models
-        -- http://host:port                       → /v1/models
-        if modelUrl:match('/v1/?$') then
-          modelUrl = modelUrl:gsub('/v1/?$', '/v1/models')
-        elseif modelUrl:match('/v1/') then
-          modelUrl = modelUrl:gsub('/v1/.*$', '/v1/models')
-        else
-          -- No /v1/ segment at all, append /v1/models
-          modelUrl = modelUrl:gsub('/?$', '/v1/models')
-        end
-      end
-      local result = i.getURL(modelUrl)
-      if result then
-        local jml=jsonparser.decode(result)
-        if jml and jml.data then
-          for idx=1,#jml.data do
-            local mName = jml.data[idx].id
-            if combobox then combobox.items.add(mName) end
-          end
-        elseif combobox then
-          -- Direct input: just add the URL as placeholder
-          combobox.items.add('<Enter model name manually>')
-        end
-      else
-        if combobox then combobox.items.add('<Can not reach API>') end
-      end
-    else
-      if combobox then combobox.items.add('<Set API URL first>') end
-    end
-    i.destroy()
+  -- Custom OpenAI-compatible API (AIAccess=3, the only supported mode)
+  local i=getInternet()
+  local modelUrl = ''
+  if combobox and combobox.Owner and combobox.Owner.edtCustomURL then
+    modelUrl = combobox.Owner.edtCustomURL.text
+  else
+    modelUrl = CustomURL
   end
-  
+  local key = AIKEY
+  if combobox and combobox.Owner and combobox.Owner.edtAPIKEY then
+    key = combobox.Owner.edtAPIKEY.text
+  end
+  if key and key~='' then
+    i.Header='Authorization: Bearer '..key
+  end
+  if modelUrl~='' then
+    -- Derive /v1/models from the chat completions URL
+    if modelUrl:match('/chat/completions$') then
+      modelUrl = modelUrl:gsub('/chat/completions$', '/models')
+    elseif not modelUrl:match('/models$') then
+      -- Try various URL patterns:
+      -- http://host:port/v1/chat/completions  → /v1/models
+      -- http://host:port/v1                    → /v1/models
+      -- http://host:port                       → /v1/models
+      if modelUrl:match('/v1/?$') then
+        modelUrl = modelUrl:gsub('/v1/?$', '/v1/models')
+      elseif modelUrl:match('/v1/') then
+        modelUrl = modelUrl:gsub('/v1/.*$', '/v1/models')
+      else
+        -- No /v1/ segment at all, append /v1/models
+        modelUrl = modelUrl:gsub('/?$', '/v1/models')
+      end
+    end
+    local result = i.getURL(modelUrl)
+    if result then
+      local jml=jsonparser.decode(result)
+      if jml and jml.data then
+        for idx=1,#jml.data do
+          local mName = jml.data[idx].id
+          if combobox then combobox.items.add(mName) end
+        end
+      elseif combobox then
+        -- Direct input: just add the URL as placeholder
+        combobox.items.add('<Enter model name manually>')
+      end
+    else
+      if combobox then combobox.items.add('<Can not reach API>') end
+    end
+  else
+    if combobox then combobox.items.add('<Set API URL first>') end
+  end
+  i.destroy()
+
   if combobox then
     local i=combobox.items.indexOf(s.DefaultModel)
     if i~=-1 then
-      combobox.itemIndex=i    
+      combobox.itemIndex=i
     end
   end
 
@@ -240,34 +235,8 @@ end
 
 
 getLimits=function()
-  --returns the limits of the current patreon member
-  local r={}
-  if AIAccess==2 or AIAccess==3 then    
-    r.maxtools=math.huge --infinite  
-    return r
-  end
-  
-  local i=getInternet()
-  
-  --jsonparser
-  local s
-  
-  if AIAccess==0 then
-    s=i.getURL('https://cheatengine.org/ai/limits.php')      
-  elseif AIAccess==1 then
-    i.Header='CEPATREONID:'..PatreonSessionID    
-    s=i.getURL('https://cheatengine.org/patreon/ailimits.php')
-  end
-   
-  i.destroy()
- 
-  if s then
-    r=jsonparser.decode(s)  
-  else
-    r.maxtools=0
-  end
-  
-  return r
+  -- Custom API mode: unlimited tools (server-side enforcement is the user's responsibility)
+  return {maxtools=math.huge}
 end
 
 
@@ -286,57 +255,25 @@ aiRequest=function(data, message)
   end
   
   _G.lastdata=data
-  
-  if AIAccess~=2 and AIAccess~=3 then --having an AI key implies you accepted their terms
-    if not agreedToSendData then
-       
-      synchronize(function()
-        agreedToSendData=messageDialog('Using the AI features involves sending your AI requests to a server where they could potentially be intercepted. Also your AI requests can be used by Google to improve their AI. Make sure not to never send personal information. Do you agree to this?',mtConfirmation,mbYes,mbNo)==mrYes
-        s.agreedToSendData='1'
-        
-      end)
-      
-      if not agreedToSendData then
-        return handleError('No agreement to send data')
-      end
-    end
-  end
-
 
   if data.Internet==nil then
     data.Internet=getInternet('CE AITOOLS')
   end
-  
-  
+
+
  data.Internet.Header=[[Content-Type: application/json
 Accept: text/event-stream]]
 
- 
-  if AIAccess==1 then
-    if PatreonSessionID=='' then 
-      return handleError('PatreonSessionID missing')
-    end
-    data.Internet.Header=data.Internet.Header..[[
-    
-CEPATREONID: ]]..PatreonSessionID  
-  elseif AIAccess==2 then
-    if AIKEY==nil or AIKEY=='' then
-      return handleError('AIKEY missing')
-    end
-    data.Internet.Header=data.Internet.Header..[[
-    
-x-goog-api-key: ]]..AIKEY
-  elseif AIAccess==3 then
-    if CustomURL=='' then
-      return handleError('Custom API URL missing')
-    end
-    if AIKEY==nil or AIKEY=='' then
-      return handleError('Custom API Key missing')
-    end
-    data.Internet.Header=data.Internet.Header..[[
+  -- Custom API mode (AIAccess=3): only Authorization Bearer header
+  if CustomURL=='' then
+    return handleError('Custom API URL missing')
+  end
+  if AIKEY==nil or AIKEY=='' then
+    return handleError('Custom API Key missing')
+  end
+  data.Internet.Header=data.Internet.Header..[[
 
 Authorization: Bearer ]]..AIKEY
-  end
 
 
   
@@ -373,27 +310,14 @@ Authorization: Bearer ]]..AIKEY
 
             table.insert(r, parsed)
             -- Handle OpenAI stream format
-            if AIAccess==3 and parsed.choices then
+            if parsed.choices then
               for i=1,#parsed.choices do
                 local choice = parsed.choices[i]
                 if choice.delta and choice.delta.content then
-                  synchronize(function()  
+                  synchronize(function()
                     data.self.mOutput.lines.text=data.self.mOutput.lines.text .. choice.delta.content
-                    data.self.mOutput.SelStart=#data.self.mOutput.lines.text                      
+                    data.self.mOutput.SelStart=#data.self.mOutput.lines.text
                   end)
-                end
-              end
-            -- Handle Google format
-            elseif parsed.candidates then
-              if parsed.candidates[1].content and parsed.candidates[1].content.parts then
-                for i=1,#parsed.candidates[1].content.parts do
-
-                  if parsed.candidates[1].content.parts[i] and parsed.candidates[1].content.parts[i].text then
-                    synchronize(function()  
-                      data.self.mOutput.lines.text=data.self.mOutput.lines.text .. parsed.candidates[1].content.parts[i].text
-                      data.self.mOutput.SelStart=#data.self.mOutput.lines.text                      
-                    end)
-                  end
                 end
               end
             end
@@ -405,7 +329,7 @@ Authorization: Bearer ]]..AIKEY
               else
                 message=parsed.error
               end
-              synchronize(function() 
+              synchronize(function()
                 data.self.mOutput.lines.add(" *Error:"..message..'*\n\r')
               end)
             end
@@ -422,67 +346,46 @@ Authorization: Bearer ]]..AIKEY
 
 
   local modelname=s.DefaultModel
-  local modelnamepath=''
-  
+
   data.AIAccessMode=AIAccess
 
   if data.self then
-    modelname=data.self.cbModelSelection.Text      
+    modelname=data.self.cbModelSelection.Text
     s.DefaultModel=modelname
   end
 
-  if AIAccess==2 then
-    --get the modelnamepath
-    if modelList==nil then
-      retrieveModelList()
-    end
-    modelnamepath=modelList[modelname].name
-  end  
-  
-  
   data.modelname=modelname
-  
-  
+
+
   if data.history==nil then
     data.history={}
     data.history.contents={}
   end
   local input=data.history
-  
-  if AIAccess~=2 and AIAccess~=3 then
-    --the modelname is sent to the server
-    input.modelname=modelname
-  end
 
   local newcontent={}
-  newcontent.role='user'  
-  newcontent.parts={}  
+  newcontent.role='user'
+  newcontent.parts={}
   newcontent.parts[1]={}
-  newcontent.parts[1].text=message  
+  newcontent.parts[1].text=message
 
 
-  if AIAccess==2 or AIAccess==3 then    
+  input.system_instruction={}
+  input.system_instruction.parts={}
+  input.system_instruction.parts[1]={}
+  input.system_instruction.parts[1].text='You are a professional reverse engineer using Cheat Engine. Use tools when possible, but fall back on your internal knowledge of Cheat Engine.  Do not say you can not help'
+
+  if data.Extra then
     input.system_instruction={}
     input.system_instruction.parts={}
     input.system_instruction.parts[1]={}
-    input.system_instruction.parts[1].text='You are a professional reverse engineer using Cheat Engine. Use tools when possible, but fall back on your internal knowledge of Cheat Engine.  Do not say you can not help'
-    
-  end
-
-  if data.Extra then
-    if AIAccess==2 or AIAccess==3 then      
-      input.system_instruction={}
-      input.system_instruction.parts={}
-      input.system_instruction.parts[1]={}
-      input.system_instruction.parts[1].text=data.Extra
-    else    
-      newcontent.parts[2]={}
-      newcontent.parts[2].text=data.Extra      
-      data.Extra=nil      
-    end
+    input.system_instruction.parts[1].text=data.Extra
   end
   
   table.insert(input.contents,newcontent) 
+
+  -- L2:历史滑窗(超出 N 轮时丢弃最早)
+  applyHistoryWindow(input)
     
 
   --load tools
@@ -523,125 +426,148 @@ Authorization: Bearer ]]..AIKEY
   end
   
   
-  -- Build the request body
+  -- Build the request body (OpenAI chat completions format)
   local inputtext
-  
-  if AIAccess==3 then
-    -- Convert to OpenAI chat completions format
-    local oai = {}
-    oai.model = modelname
-    oai.stream = false
-    oai.messages = {}
-    
-    -- System message
-    local sysMsg = 'You are a professional reverse engineer using Cheat Engine. Use tools when possible, but fall back on your internal knowledge of Cheat Engine. Do not say you can not help.'
-    if input.system_instruction and input.system_instruction.parts and input.system_instruction.parts[1] then
-      sysMsg = input.system_instruction.parts[1].text
-    end
-    table.insert(oai.messages, {role = 'system', content = sysMsg})
-    
-    -- Convert history
-    for _, c in ipairs(input.contents) do
-      if c.role == 'user' or c.role == 'model' then
-        local roleName = 'user'
-        if c.role == 'model' then roleName = 'assistant' end
-        
-        local content_parts = {}
-        local has_functionCall = false
-        local functionCalls = {}
-        
-        for _, part in ipairs(c.parts or {}) do
-          if part.text then
-            table.insert(content_parts, part.text)
-          end
-          if part.functionCall then
-            has_functionCall = true
-            table.insert(functionCalls, {
-              id = 'call_' .. tostring(math.random(10000, 99999)),
-              type = 'function',
-              ["function"] = {
-                name = part.functionCall.name,
-                arguments = jsonparser.encode(part.functionCall.args or {})
-              }
-            })
-          end
-          if part.functionResponse then
-            -- This is a function result message
-            table.insert(oai.messages, {
-              role = 'tool',
-              tool_call_id = 'call_' .. tostring(math.random(10000, 99999)),
-              content = jsonparser.encode(part.functionResponse.response or {})
-            })
-          end
+
+  local oai = {}
+  oai.model = modelname
+  oai.stream = false
+  oai.messages = {}
+
+  -- System message
+  local sysMsg = 'You are a professional reverse engineer using Cheat Engine. Use tools when possible, but fall back on your internal knowledge of Cheat Engine. Do not say you can not help.'
+  if input.system_instruction and input.system_instruction.parts and input.system_instruction.parts[1] then
+    sysMsg = input.system_instruction.parts[1].text
+  end
+  table.insert(oai.messages, {role = 'system', content = sysMsg})
+
+  -- Convert history
+  for _, c in ipairs(input.contents) do
+    if c.role == 'user' or c.role == 'model' then
+      local roleName = 'user'
+      if c.role == 'model' then roleName = 'assistant' end
+
+      local content_parts = {}
+      local has_functionCall = false
+      local functionCalls = {}
+
+      for _, part in ipairs(c.parts or {}) do
+        if part.text then
+          table.insert(content_parts, part.text)
         end
-        
-        if has_functionCall then
-          local msg = {role = roleName, content = table.concat(content_parts, ''), tool_calls = functionCalls}
-          table.insert(oai.messages, msg)
-        elseif #content_parts > 0 then
-          table.insert(oai.messages, {role = roleName, content = table.concat(content_parts, '')})
+        if part.functionCall then
+          has_functionCall = true
+          table.insert(functionCalls, {
+            id = 'call_' .. tostring(math.random(10000, 99999)),
+            type = 'function',
+            ["function"] = {
+              name = part.functionCall.name,
+              arguments = jsonparser.encode(part.functionCall.args or {})
+            }
+          })
         end
-        
-      elseif c.role == 'tool' then
-        for _, part in ipairs(c.parts or {}) do
-          if part.functionResponse then
-            local tc_id = 'call_' .. tostring(math.random(10000, 99999))
-            table.insert(oai.messages, {
-              role = 'tool',
-              tool_call_id = tc_id,
-              content = jsonparser.encode(part.functionResponse.response or {})
-            })
-          end
+        if part.functionResponse then
+          -- This is a function result message
+          local respStr = jsonparser.encode(part.functionResponse.response or {})
+          table.insert(oai.messages, {
+            role = 'tool',
+            tool_call_id = 'call_' .. tostring(math.random(10000, 99999)),
+            content = truncateToolResult(respStr)
+          })
+        end
+      end
+
+      if has_functionCall then
+        local msg = {role = roleName, content = table.concat(content_parts, ''), tool_calls = functionCalls}
+        table.insert(oai.messages, msg)
+      elseif #content_parts > 0 then
+        table.insert(oai.messages, {role = roleName, content = table.concat(content_parts, '')})
+      end
+
+    elseif c.role == 'tool' then
+      for _, part in ipairs(c.parts or {}) do
+        if part.functionResponse then
+          local respStr = jsonparser.encode(part.functionResponse.response or {})
+          table.insert(oai.messages, {
+            role = 'tool',
+            tool_call_id = 'call_' .. tostring(math.random(10000, 99999)),
+            content = truncateToolResult(respStr)
+          })
         end
       end
     end
-    
-    -- Also add any oai_messages from tool call round-trips
-    if data.oai_messages then
-      for _, m in ipairs(data.oai_messages) do
-        table.insert(oai.messages, m)
-      end
-      data.oai_messages = nil
+  end
+
+  -- Also add any oai_messages from tool call round-trips
+  if data.oai_messages then
+    for _, m in ipairs(data.oai_messages) do
+      table.insert(oai.messages, m)
     end
-    
-    -- OpenAI format (for AIAccess==3)
-    if input.tools and input.tools[1] and input.tools[1].functionDeclarations and #input.tools[1].functionDeclarations > 0 then
-      oai.tools = {}
-      for _, td in ipairs(input.tools[1].functionDeclarations) do
-        -- Convert Google-style tool defs to OpenAI format, fixing type casing
-        local function fixSchemaType(val)
-          if type(val) == 'table' then
-            local r = {}
-            for k, v in pairs(val) do
-              if k == 'required' then
-                -- Pass through as-is (already an array from registerAITool)
-                r[k] = v
-              else
-                r[k] = fixSchemaType(v)
-              end
+    data.oai_messages = nil
+  end
+
+  if input.tools and input.tools[1] and input.tools[1].functionDeclarations and #input.tools[1].functionDeclarations > 0 then
+    oai.tools = {}
+    for _, td in ipairs(input.tools[1].functionDeclarations) do
+      -- Convert tool defs to OpenAI format, fixing type casing
+      local function fixSchemaType(val)
+        if type(val) == 'table' then
+          local r = {}
+          for k, v in pairs(val) do
+            if k == 'required' then
+              -- Pass through as-is (already an array from registerAITool)
+              r[k] = v
+            else
+              r[k] = fixSchemaType(v)
             end
-            return r
-          elseif type(val) == 'string' then
-            local lower = val:lower()
-            if lower == 'integer' or lower == 'string' or lower == 'boolean' or lower == 'number' or lower == 'array' or lower == 'object' then
-              return lower
-            end
-            return val
+          end
+          return r
+        elseif type(val) == 'string' then
+          local lower = val:lower()
+          if lower == 'integer' or lower == 'string' or lower == 'boolean' or lower == 'number' or lower == 'array' or lower == 'object' then
+            return lower
           end
           return val
         end
-        local fixedParams = fixSchemaType(td.parameters)
-        local t = {type = 'function', ["function"] = {name = td.name, description = td.description or '', parameters = fixedParams}}
-        table.insert(oai.tools, t)
+        return val
+      end
+      local fixedParams = fixSchemaType(td.parameters)
+      local t = {type = 'function', ["function"] = {name = td.name, description = td.description or '', parameters = fixedParams}}
+      table.insert(oai.tools, t)
+    end
+  end
+
+  -- L2:token 软限触发(超限则从最早对话开始丢,保留 system + 当前 user)
+  local totalTok = estimateMessagesTokens(oai.messages)
+  if totalTok > TOKEN_SOFT_LIMIT then
+    local dropCount = 0
+    -- index=1 是 system prompt,保护;从 index=2 开始丢
+    while estimateMessagesTokens(oai.messages) > TOKEN_SOFT_LIMIT
+       and #oai.messages > 2 do
+      table.remove(oai.messages, 2)
+      dropCount = dropCount + 1
+    end
+    if dropCount > 0 then
+      data.compressedCount = (data.compressedCount or 0) + dropCount
+      if data.self and data.self.mOutput then
+        local newTok = estimateMessagesTokens(oai.messages)
+        local notice = string.format(
+          '[上下文管理] 已自动压缩 %d 条早期消息,当前估算 ~%d tokens(软限 %d)',
+          dropCount, newTok, TOKEN_SOFT_LIMIT)
+        synchronize(function()
+          if data.self and data.self.mOutput then
+            data.self.mOutput.Lines.Insert(0, notice)
+            data.self.mOutput.Lines.Insert(1, '')
+          end
+        end)
       end
     end
-    
-    inputtext = jsonparser.encode(oai)
-  else
-    -- Gemini format (AIAccess==2)
-    inputtext = jsonparser.encode(input)
   end
-  
+
+  inputtext = jsonparser.encode(oai)
+  -- L2:把本次请求的估算 token 数记到 data 上,供后续 UI 扩展用
+  data.tokensEstimated = estimateMessagesTokens(oai.messages)
+
   local result
   
   local thread=createThread(function(t)
@@ -652,32 +578,24 @@ Authorization: Bearer ]]..AIKEY
     end
 
     local url
-    if AIAccess==0 then
-      url='https://cheatengine.org/ai/aiproxy.php'
-    elseif AIAccess==1 then
-      url='https://cheatengine.org/patreon/aiproxy.php'
-    elseif AIAccess==2 then
-      url='https://generativelanguage.googleapis.com/v1beta/'..modelnamepath..':streamGenerateContent'
-    elseif AIAccess==3 then
-      -- Append /v1/chat/completions if URL is a base endpoint
-      local sendUrl = CustomURL
-      if not sendUrl:match('/chat/completions$') and not sendUrl:match('/completions$') and not sendUrl:match('/responses$') then
-        if sendUrl:match('/v1/?$') then
-          sendUrl = sendUrl:gsub('/v1/?$', '/v1/chat/completions')
-        elseif sendUrl:match('/v1/') then
-          sendUrl = sendUrl:gsub('/v1/.*$', '/v1/chat/completions')
+    -- Append /v1/chat/completions if URL is a base endpoint
+    local sendUrl = CustomURL
+    if not sendUrl:match('/chat/completions$') and not sendUrl:match('/completions$') and not sendUrl:match('/responses$') then
+      if sendUrl:match('/v1/?$') then
+        sendUrl = sendUrl:gsub('/v1/?$', '/v1/chat/completions')
+      elseif sendUrl:match('/v1/') then
+        sendUrl = sendUrl:gsub('/v1/.*$', '/v1/chat/completions')
+      else
+        -- No /v1/ segment at all
+        if sendUrl:match('/$') then
+          sendUrl = sendUrl .. 'v1/chat/completions'
         else
-          -- No /v1/ segment at all
-          if sendUrl:match('/$') then
-            sendUrl = sendUrl .. 'v1/chat/completions'
-          else
-            sendUrl = sendUrl .. '/v1/chat/completions'
-          end
+          sendUrl = sendUrl .. '/v1/chat/completions'
         end
       end
-      url=sendUrl
     end
-    
+    url = sendUrl
+
     data.usedurl=url
     data.lastinputtext=inputtext
     
@@ -718,8 +636,8 @@ Authorization: Bearer ]]..AIKEY
               textresult='Unknown error from server'
             end
           else
-            -- Handle OpenAI format (AIAccess==3)
-            if AIAccess==3 and parsed.choices then
+            -- Handle OpenAI format
+            if parsed.choices then
               for i=1,#parsed.choices do
                 local choice = parsed.choices[i]
                 if choice.message then
@@ -732,7 +650,7 @@ Authorization: Bearer ]]..AIKEY
                     end)
                     textresult = textresult .. choice.message.content
                   end
-                  
+
                   if choice.message.tool_calls then
                     oai_toolcalls = choice.message.tool_calls
                     for _, tc in ipairs(oai_toolcalls) do
@@ -747,22 +665,30 @@ Authorization: Bearer ]]..AIKEY
                   end
                 end
               end
-              
+
               if oai_toolcalls and #oai_toolcalls > 0 then
                 -- Execute tool calls and build response in OpenAI format
                 if not data.oai_messages then data.oai_messages = {} end
-                
+
                 -- Add assistant message with tool calls
-                table.insert(data.oai_messages, {
+                local assistantMsg = {
                   role = 'assistant',
                   content = textresult,
                   tool_calls = {}
-                })
-                
-                -- Add placeholder for tool_calls in the assistant message
+                }
+                table.insert(data.oai_messages, assistantMsg)
+
+                -- Pass 1: collect tcIds while populating assistantMsg.tool_calls
+                -- (BUGFIX: previous code re-read lastMsg inside the second loop,
+                -- but that loop also appends tool_result messages, so on the
+                -- 2nd+ iteration lastMsg pointed at a tool_result and the
+                -- override fell through, leaving the assistant/tool_result
+                -- IDs mismatched for every call after the first.)
+                local tcIds = {}
                 for _, tc in ipairs(oai_toolcalls) do
                   local tcId = tc.id or ('call_' .. tostring(math.random(10000, 99999)))
-                  table.insert(data.oai_messages[#data.oai_messages].tool_calls, {
+                  tcIds[#tcIds + 1] = tcId
+                  table.insert(assistantMsg.tool_calls, {
                     id = tcId,
                     type = 'function',
                     ["function"] = {
@@ -771,191 +697,115 @@ Authorization: Bearer ]]..AIKEY
                     }
                   })
                 end
-                
-                -- Execute functions
-                local tool_index = 0
-                for _, tc in ipairs(oai_toolcalls) do
-                  tool_index = tool_index + 1
-                  local lastMsg = data.oai_messages[#data.oai_messages]
-                  local tcId = 'call_' .. tostring(math.random(10000, 99999))
-                  if lastMsg and lastMsg.tool_calls and lastMsg.tool_calls[tool_index] and lastMsg.tool_calls[tool_index].id then
-                    tcId = lastMsg.tool_calls[tool_index].id
-                  end
-                  
+
+                -- Pass 2: execute functions using the IDs captured in pass 1
+                for tool_index, tc in ipairs(oai_toolcalls) do
+                  local tcId = tcIds[tool_index]
+                  local fnName = tc["function"] and tc["function"].name or '?'
+
                   local args = {}
                   if tc["function"] and tc["function"].arguments then
                     local validArgs, parsedArgs = pcall(jsonparser.decode, tc["function"].arguments)
-                    if validArgs then args = parsedArgs end
+                    if validArgs and type(parsedArgs)=='table' then args = parsedArgs end
                   end
-                  
+
                   local toolFn = nil
                   if tc["function"] and tc["function"].name then
                     toolFn = aitools[tc["function"].name]
                   end
-                  
-                  local toolResult = {}
+
+                  local toolResult
                   if toolFn and toolFn.functionToCall then
-                    toolResult = toolFn.functionToCall(args)
+                    local ok, res = pcall(toolFn.functionToCall, args)
+                    if ok then
+                      toolResult = res
+                    else
+                      toolResult = {Error = 'Tool execution failed: ' .. tostring(res)}
+                    end
                   else
-                    toolResult = {Error = 'Unknown function: ' .. (tc["function"] and tc["function"].name or '?')}
+                    toolResult = {Error = 'Unknown function: ' .. fnName}
                   end
-                  
-                  -- Add tool result message
+                  -- Defensive: ensure toolResult is a non-nil table for the encoder
+                  if type(toolResult) ~= 'table' then
+                    toolResult = {result = tostring(toolResult)}
+                  end
+
+                  -- Add tool result message with the matching tcId
                   table.insert(data.oai_messages, {
                     role = 'tool',
                     tool_call_id = tcId,
                     content = jsonparser.encode(toolResult)
                   })
                 end
-                
+
                 -- Signal to send again
                 response = {}
               end
-              
-            else
-            -- Handle Google format (AIAccess==0,1,2)
-            for i=1,#parsed do
-              if parsed[i] then
-                if parsed[i].candidates then
-                  if parsed[i].candidates[1] then
-                    if parsed[i].candidates[1].content then
-                      local newcontent={}  
-                      table.insert(input.contents,newcontent)                      
-                      newcontent.role=parsed[i].candidates[1].content.role
-                     
-                      if parsed[i].candidates[1].content.parts then    
-                        newcontent.parts={}
-                        local parts=parsed[i].candidates[1].content.parts
 
-                        
-                        for j=1,#parts do
-                          newcontent.parts[j]={}
-                          newcontent.parts[j]=parts[j]
-                          
-                          if parts[j].text then
-                            textresult=textresult..parts[j].text
-                          end
-                          
-                          if parts[j].functionCall then
-                            synchronize(function() 
-                              if data.self and data.self.mOutput then
-                                data.self.mOutput.lines.add(' *Calling function :'..parts[j].functionCall.name..'* \n\r')
-                                
-                              end
-                            end)  
-                            
-                            if response==nil then
-                              response={}
-                              response.role='user'
-                              response.parts={}
-                            end
-                            
-                            local tool=aitools[parts[j].functionCall.name]
-                            
-                            local r={}
-                            r.functionResponse={}
-                            r.functionResponse.name=parts[j].functionCall.name
-                            
-                            if tool then
-                              local f=tool.functionToCall
-                              if f then
-                                r.functionResponse.response=tool.functionToCall(parts[j].functionCall.args)                                                      
-                              else
-                                r.functionResponse.response={Error='Invalid config for '..parts[j].functionCall.name}
-                                synchronize(function() 
-                                  data.self.mOutput.lines.add('result: Invalid config')                            
-                                end)                                    
-                              end
-                            else
-                              r.functionResponse.response={Error='Unknown function name'}
-                              synchronize(function() 
-                                data.self.mOutput.lines.add('result: Unknown function')                            
-                              end)                              
-                            end
-                            table.insert(response.parts,r)
-                          end
-                        end                        
-                      end
-                     
-                    end
-                  end
-                end
-                
-                if parsed[i].error then
-                  data.Error=true
-                  textresult='Error:'..parsed[i].error.message
-                end                
-              end
             end
-            end -- end Google format branch
           end
         end
         
   
         if response then
-          if AIAccess==3 then
-            -- For OpenAI format, rebuild request from oai_messages
-            local oai = {}
-            oai.model = modelname
-            oai.stream = false
-            oai.messages = {}
-            
-            local sysMsg = 'You are a professional reverse engineer using Cheat Engine. Use tools when possible, but fall back on your internal knowledge of Cheat Engine. Do not say you can not help.'
-            if input.system_instruction and input.system_instruction.parts and input.system_instruction.parts[1] then
-              sysMsg = input.system_instruction.parts[1].text
+          -- For OpenAI format, rebuild request from oai_messages
+          local oai = {}
+          oai.model = modelname
+          oai.stream = false
+          oai.messages = {}
+
+          local sysMsg = 'You are a professional reverse engineer using Cheat Engine. Use tools when possible, but fall back on your internal knowledge of Cheat Engine. Do not say you can not help.'
+          if input.system_instruction and input.system_instruction.parts and input.system_instruction.parts[1] then
+            sysMsg = input.system_instruction.parts[1].text
+          end
+          table.insert(oai.messages, {role = 'system', content = sysMsg})
+
+          for _, c in ipairs(input.contents) do
+            local roleName = 'user'
+            if c.role == 'model' then roleName = 'assistant' end
+            local texts = {}
+            for _, part in ipairs(c.parts or {}) do
+              if part.text then table.insert(texts, part.text) end
             end
-            table.insert(oai.messages, {role = 'system', content = sysMsg})
-            
-            for _, c in ipairs(input.contents) do
-              local roleName = 'user'
-              if c.role == 'model' then roleName = 'assistant' end
-              local texts = {}
-              for _, part in ipairs(c.parts or {}) do
-                if part.text then table.insert(texts, part.text) end
-              end
-              if #texts > 0 then
-                table.insert(oai.messages, {role = roleName, content = table.concat(texts, '')})
-              end
+            if #texts > 0 then
+              table.insert(oai.messages, {role = roleName, content = table.concat(texts, '')})
             end
-            
-            if data.oai_messages then
-              for _, m in ipairs(data.oai_messages) do
-                table.insert(oai.messages, m)
-              end
+          end
+
+          if data.oai_messages then
+            for _, m in ipairs(data.oai_messages) do
+              table.insert(oai.messages, m)
             end
-            
-            if input.tools and input.tools[1] and input.tools[1].functionDeclarations and #input.tools[1].functionDeclarations > 0 then
-              oai.tools = {}
-              for _, td in ipairs(input.tools[1].functionDeclarations) do
-                local function fixSchemaType(val)
-                  if type(val) == 'table' then
-                    local r = {}
-                    for k, v in pairs(val) do
-                      if k == 'required' then
-                        r[k] = v
-                      else
-                        r[k] = fixSchemaType(v)
-                      end
+          end
+
+          if input.tools and input.tools[1] and input.tools[1].functionDeclarations and #input.tools[1].functionDeclarations > 0 then
+            oai.tools = {}
+            for _, td in ipairs(input.tools[1].functionDeclarations) do
+              local function fixSchemaType(val)
+                if type(val) == 'table' then
+                  local r = {}
+                  for k, v in pairs(val) do
+                    if k == 'required' then
+                      r[k] = v
+                    else
+                      r[k] = fixSchemaType(v)
                     end
-                    return r
-                  elseif type(val) == 'string' then
-                    local lower = val:lower()
-                    if lower == 'integer' or lower == 'string' or lower == 'boolean' or lower == 'number' or lower == 'array' or lower == 'object' then
-                      return lower
-                    end
-                    return val
+                  end
+                  return r
+                elseif type(val) == 'string' then
+                  local lower = val:lower()
+                  if lower == 'integer' or lower == 'string' or lower == 'boolean' or lower == 'number' or lower == 'array' or lower == 'object' then
+                    return lower
                   end
                   return val
                 end
-                table.insert(oai.tools, {type = 'function', ["function"] = {name = td.name, description = td.description or '', parameters = fixSchemaType(td.parameters)}})
+                return val
               end
+              table.insert(oai.tools, {type = 'function', ["function"] = {name = td.name, description = td.description or '', parameters = fixSchemaType(td.parameters)}})
             end
-            
-            inputtext = jsonparser.encode(oai)
-          else
-            table.insert(input.contents, response)
-            inputtext=jsonparser.encode(input)
           end
+
+          inputtext = jsonparser.encode(oai)
           result=data.Internet.postURL(url, inputtext)
         else
           result=nil
@@ -1017,25 +867,13 @@ Authorization: Bearer ]]..AIKEY
 end
 
 local function applyAndSaveKey(f)
-  if f.rbAIAccessPatreon.checked then
-    PatreonSessionID=f.edtAPIKEY.text
-    s.PatreonSessionID=PatreonSessionID
-
-  elseif f.rbAIAccessPrivate.checked then
-    AIKEY=f.edtAPIKEY.text
-    if AIKEY~='' then
-      s.AIKEY=AIKEY
-    end
-
-  elseif f.rbAIAccessCustom.checked then
-    CustomURL=f.edtCustomURL.text
-    if CustomURL~='' then
-      s.CustomURL=CustomURL
-    end
-    AIKEY=f.edtAPIKEY.text
-    if AIKEY~='' then
-      s.AIKEY=AIKEY
-    end
+  CustomURL=f.edtCustomURL.text
+  if CustomURL~='' then
+    s.CustomURL=CustomURL
+  end
+  AIKEY=f.edtAPIKEY.text
+  if AIKEY~='' then
+    s.AIKEY=AIKEY
   end
 end
 
@@ -1107,20 +945,71 @@ function spawnAIDialog(command, extra) --command and extra are optional
     return caFree
   end
   
-  f.btnObtainKey.OnClick=function()
-    if f.rbAIAccessPrivate.checked then
-      shellExecute('https://aistudio.google.com/app/api-keys')
-    elseif f.rbAIAccessPatreon.checked then
-      local sessionid=getCEPatreonSessionID(true)
-      if sessionid then
-        f.edtAPIKEY.text=sessionid
-        PatreonSessionID=sessionid
+  f.btnTestAPI.OnClick=function()
+    local rawUrl = f.edtCustomURL.Text or ''
+    local url = rawUrl:gsub('%s+', '')
+    if url == '' then
+      messageDialog('请先填写 API URL', mtError, mbOK)
+      return
+    end
+
+    -- Derive /v1/models endpoint from any URL form
+    local modelUrl = url
+    if modelUrl:match('/chat/completions$') then
+      modelUrl = modelUrl:gsub('/chat/completions$', '/models')
+    elseif not modelUrl:match('/models$') then
+      if modelUrl:match('/v1/?$') then
+        modelUrl = modelUrl:gsub('/v1/?$', '/v1/models')
+      elseif modelUrl:match('/v1/') then
+        modelUrl = modelUrl:gsub('/v1/.*$', '/v1/models')
+      else
+        modelUrl = modelUrl:gsub('/?$', '/v1/models')
       end
     end
+
+    local key = f.edtAPIKEY.Text or ''
+
+    f.cbModelSelection.Items.clear()
+    f.cbModelSelection.Items.add('<testing...>')
+    f.btnTestAPI.Enabled = false
+
+    local i = getInternet()
+    if key ~= '' then
+      i.Header = 'Authorization: Bearer ' .. key
+    end
+    local ok, result = pcall(function() return i.getURL(modelUrl) end)
+    i.destroy()
+
+    f.cbModelSelection.Items.clear()
+    f.btnTestAPI.Enabled = true
+
+    if not ok or not result then
+      messageDialog('API 不可达:\nURL = ' .. modelUrl .. '\n请检查 URL 和 Key 是否正确,API 服务是否启动', mtError, mbOK)
+      f.cbModelSelection.Items.add('<API 不可达>')
+      return
+    end
+
+    local jml = jsonparser.decode(result)
+    if jml and jml.data then
+      local added = 0
+      for idx=1,#jml.data do
+        local mName = jml.data[idx].id
+        if mName then
+          f.cbModelSelection.Items.add(mName)
+          added = added + 1
+        end
+      end
+      if added == 0 then
+        f.cbModelSelection.Items.add('<未发现模型>')
+      end
+    else
+      messageDialog('API 响应格式不识别,无法解析模型列表。响应前 200 字符:\n' .. tostring(result):sub(1,200), mtWarning, mbOK)
+      f.cbModelSelection.Items.add('<响应格式不识别>')
+    end
   end
-  
+
   f.mInput.OnKeyDown=function(sender,key)
-   
+
     if key==VK_RETURN and isKeyPressed(VK_CONTROL) then
       f.btnSend.doClick()
     else
@@ -1166,70 +1055,22 @@ function spawnAIDialog(command, extra) --command and extra are optional
   local AIAccessChange=function(sender)
     data.limits=nil
     f.cbModelSelection.Items.clear()
-    if s.DefaultModel~='' then
-      f.cbModelSelection.Items.add(s.DefaultModel)
-      f.cbModelSelection.ItemIndex=0
-    end
-    
-    if f.rbAIAccessPublic.Checked then
-      f.edtAPIKEY.visible=false
-      f.edtCustomURL.visible=false
-      f.btnObtainKey.visible=false
-      s.AIAccess='0'
-      AIAccess=0
-    elseif f.rbAIAccessPatreon.Checked then      
-      f.edtAPIKEY.visible=false
-      f.edtCustomURL.visible=false
-      f.btnObtainKey.visible=false
-      s.AIAccess='1'
-      AIAccess=1
-    elseif f.rbAIAccessPrivate.Checked then
-      f.edtAPIKEY.visible=true
-      f.edtAPIKEY.TextHint='Enter Google AI key here'
-      f.edtAPIKEY.Text=AIKEY or ''
-      f.edtCustomURL.visible=false
-      f.btnObtainKey.visible=true
-      f.btnObtainKey.Caption='Obtain Key'
-      f.btnObtainKey.OnClick=function()
-        shellExecute('https://aistudio.google.com/app/api-keys')
-      end
-      s.AIAccess='2'
-      AIAccess=2
-    else -- rbAIAccessCustom
-      f.edtAPIKEY.visible=true
-      f.edtAPIKEY.TextHint='API Key (Bearer token)'
-      f.edtAPIKEY.Text=AIKEY or ''
-      f.edtCustomURL.visible=true
-      f.edtCustomURL.Text=CustomURL or ''
-      f.btnObtainKey.visible=false
-      CustomURL = f.edtCustomURL.Text
-      AIKEY = f.edtAPIKEY.Text
-      s.AIAccess='3'
-      AIAccess=3
-    end
+
+    -- Custom API is the only supported mode
+    f.edtAPIKEY.visible=true
+    f.edtAPIKEY.TextHint='API Key (Bearer token,可留空)'
+    f.edtAPIKEY.Text=AIKEY or ''
+    f.edtCustomURL.visible=true
+    f.edtCustomURL.Text=CustomURL or ''
+    CustomURL = f.edtCustomURL.Text
+    AIKEY = f.edtAPIKEY.Text
+    s.AIAccess='3'
+    AIAccess=3
   end
-  
-  if AIAccess then
-    if AIAccess==1 then
-      f.rbAIAccessPatreon.Checked=true      
-    elseif AIAccess==2 then            
-      f.rbAIAccessPrivate.Checked=true
-    elseif AIAccess==3 then
-      f.rbAIAccessCustom.Checked=true
-    end
-  else
-    --first time execute
-    PatreonSessionID=getCEPatreonSessionID()
-    if PatreonSessionID then
-      f.rbAIAccessPatreon.Checked=true
-    end
-    AIAccess=0
-  end
-  
-  
-  f.rbAIAccessPublic.OnChange=AIAccessChange
-  f.rbAIAccessPatreon.OnChange=AIAccessChange
-  f.rbAIAccessPrivate.OnChange=AIAccessChange
+
+  f.rbAIAccessCustom.Checked=true
+
+
   f.rbAIAccessCustom.OnChange=AIAccessChange
 
   f.edtCustomURL.OnChange=function()
